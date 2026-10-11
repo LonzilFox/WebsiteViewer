@@ -99,7 +99,7 @@ internal static class UiTheme
     {
         box.BackColor = readOnly ? Color.FromArgb(10, 16, 28) : Input;
         box.ForeColor = readOnly ? Muted : Text;
-        box.BorderStyle = BorderStyle.FixedSingle;
+        box.BorderStyle = BorderStyle.None;
         box.Font = UiFont(9.8f);
         box.AutoSize = false;
         box.Height = 36;
@@ -107,11 +107,43 @@ internal static class UiTheme
         box.ShortcutsEnabled = true;
     }
 
+    // WinForms 的 FixedSingle 文本框边框来自系统主题，深色背景下会变成亮白色。
+    // TextBox 本身禁用边框，置入同色容器并进行垂直居中，缩放时不会裁切文字。
+    public static Panel InputHost(TextBox box, bool readOnly = false, Padding? margin = null)
+    {
+        var bg = readOnly ? Color.FromArgb(10, 16, 28) : Input;
+        var host = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = bg,
+            Margin = margin ?? Padding.Empty,
+            Padding = Padding.Empty
+        };
+        box.BorderStyle = BorderStyle.None;
+        box.BackColor = bg;
+        box.AutoSize = true;
+        box.Dock = DockStyle.None;
+        box.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        box.Margin = Padding.Empty;
+        void Reposition()
+        {
+            if (host.IsDisposed || box.IsDisposed) return;
+            int h = box.PreferredHeight;
+            box.SetBounds(9, Math.Max(0, (host.ClientSize.Height - h) / 2),
+                Math.Max(1, host.ClientSize.Width - 18), h);
+        }
+        host.Controls.Add(box);
+        host.SizeChanged += (_, _) => Reposition();
+        box.FontChanged += (_, _) => Reposition();
+        Reposition();
+        return host;
+    }
+
     public static void StyleNumeric(NumericUpDown box)
     {
         box.BackColor = Input;
         box.ForeColor = Text;
-        box.BorderStyle = BorderStyle.FixedSingle;
+        box.BorderStyle = BorderStyle.None;
         box.Font = UiFont(9.3f);
         box.Height = 32;
     }
@@ -130,6 +162,10 @@ internal static class UiTheme
         grid.Dock = DockStyle.Fill;
         grid.BackgroundColor = Card;
         grid.BorderStyle = BorderStyle.None;
+        // 禁用原生 Raised 表头与网格的系统边线（部分 Windows 主题会绘制白线）。
+        grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+        grid.RowHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+        grid.CellBorderStyle = DataGridViewCellBorderStyle.None;
         grid.AllowUserToAddRows = false;
         grid.AllowUserToDeleteRows = false;
         grid.AllowUserToResizeRows = false;

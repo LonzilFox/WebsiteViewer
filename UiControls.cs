@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Collections.ObjectModel;
 
 namespace WebsiteViewer;
 
@@ -236,43 +237,215 @@ internal sealed class PillLabel : Control
     }
 }
 
-internal sealed class FlatTabControl : TabControl
+// 不使用原生 TabControl：其未选中标签区域与边框由 Windows 主题绘制，
+// 在深色窗口中会产生显眼的浅灰背景和白色外框，OwnerDrawFixed 无法覆盖这些区域。
+// 改为纯自绘标签条 + 普通 Panel 页面：所有像素均由应用深色主题绘制。
+internal sealed class FlatTabControl : UserControl
 {
-    public FlatTabControl()
+    private readonly TabStrip _tabStrip;
+    private readonly Panel _pageHost;
+    private Panel? _selectedTab;
+
+    public TabCollection TabPages { get; }
+    public event EventHandler? SelectedIndexChanged;
+
+    public Panel? SelectedTab
     {
-        DrawMode = TabDrawMode.OwnerDrawFixed;
-        SizeMode = TabSizeMode.Fixed;
-        ItemSize = new Size(112, 38);
-        Font = UiTheme.UiFont(9.3f, FontStyle.Bold);
-        Padding = new Point(12, 5);
-        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        get => _selectedTab;
+        set
+        {
+            if (ReferenceEquals(_selectedTab, value)) return;
+            if (value is not null && !TabPages.Contains(value))
+                throw new ArgumentException("The selected page must be added to TabPages.", nameof(value));
+            SuspendLayout();
+            _pageHost.SuspendLayout();
+            try
+            {
+                foreach (var page in TabPages)
+                    page.Visible = ReferenceEquals(page, value);
+                _selectedTab = value;
+                value?.BringToFront();
+            }
+            finally
+            {
+                _pageHost.ResumeLayout(true);
+                ResumeLayout(true);
+            }
+            _tabStrip.Invalidate();
+            SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 
-    protected override void OnDrawItem(DrawItemEventArgs e)
+    public int SelectedIndex
     {
-        if (e.Index < 0 || e.Index >= TabPages.Count) return;
-        var page = TabPages[e.Index];
-        var rect = GetTabRect(e.Index);
-        bool selected = SelectedIndex == e.Index;
+        get => _selectedTab is null ? -1 : TabPages.IndexOf(_selectedTab);
+        set => SelectedTab = value >= 0 && value < TabPages.Count ? TabPages[value] : null;
+    }
 
-        using var bg = new SolidBrush(selected ? UiTheme.Card2 : UiTheme.Card);
-        e.Graphics.FillRectangle(bg, rect);
+    public FlatTabControl()
+    {
+        BackColor = UiTheme.Card;
+        Margin = Padding.Empty;
+        Padding = Padding.Empty;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
 
-        TextRenderer.DrawText(
-            e.Graphics,
-            page.Text,
-            Font,
-            rect,
-            selected ? UiTheme.Text : UiTheme.Muted,
-            TextFormatFlags.HorizontalCenter |
-            TextFormatFlags.VerticalCenter |
-            TextFormatFlags.EndEllipsis |
-            TextFormatFlags.NoPadding);
-
-        if (selected)
+        _pageHost = new Panel
         {
-            using var accent = new SolidBrush(UiTheme.Accent);
-            e.Graphics.FillRectangle(accent, rect.Left + 10, rect.Bottom - 3, Math.Max(1, rect.Width - 20), 3);
+            Dock = DockStyle.Fill,
+            BackColor = UiTheme.Card,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        _tabStrip = new TabStrip(this)
+        {
+            Dock = DockStyle.Top,
+            Height = 42,
+            BackColor = UiTheme.Card,
+            Margin = Padding.Empty
+        };
+        Controls.Add(_pageHost);
+        Controls.Add(_tabStrip);
+        TabPages = new TabCollection(this);
+    }
+
+    public sealed class TabCollection : Collection<Panel>
+    {
+        private readonly FlatTabControl _owner;
+        internal TabCollection(FlatTabControl owner) => _owner = owner;
+
+        protected override void InsertItem(int index, Panel item)
+        {
+            ArgumentNullException.ThrowIfNull(item);
+            if (Contains(item)) throw new ArgumentException("Duplicate tab page.", nameof(item));
+            base.InsertItem(index, item);
+            item.Dock = DockStyle.Fill;
+            item.Margin = Padding.Empty;
+            item.Padding = Padding.Empty;
+            item.BackColor = UiTheme.Card;
+            item.Visible = false;
+            _owner._pageHost.Controls.Add(item);
+            if (_owner._selectedTab is null) _owner.SelectedTab = item;
+            else _owner._tabStrip.Invalidate();
+        }
+
+        protected override void RemoveItem(int index)
+        {
+            var removed = this[index];
+            _owner._pageHost.Controls.Remove(removed);
+            base.RemoveItem(index);
+            if (ReferenceEquals(_owner.SelectedTab, removed))
+                _owner.SelectedTab = Count == 0 ? null : this[Math.Min(index, Count - 1)];
+            _owner._tabStrip.Invalidate();
+        }
+
+        protected override void ClearItems()
+        {
+            _owner.SelectedTab = null;
+            _owner._pageHost.Controls.Clear();
+            base.ClearItems();
+            _owner._tabStrip.Invalidate();
+        }
+    }
+
+    private sealed class TabStrip : Control
+    {
+        private readonly FlatTabControl _owner;
+        private int _hoverIndex = -1;
+        private const int TabWidth = 114;
+        private const int TabGap = 3;
+        private const int StartX = 8;
+
+        public TabStrip(FlatTabControl owner)
+        {
+            _owner = owner;
+            Font = UiTheme.UiFont(9.3f, FontStyle.Bold);
+            TabStop = true;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                     ControlStyles.Selectable, true);
+        }
+
+        private Rectangle GetTabBounds(int index) =>
+            new(StartX + index * (TabWidth + TabGap), 3, TabWidth, Math.Max(25, Height - 5));
+
+        private int HitTest(Point p)
+        {
+            for (int i = 0; i < _owner.TabPages.Count; i++)
+                if (GetTabBounds(i).Contains(p)) return i;
+            return -1;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int index = HitTest(e.Location);
+            if (index == _hoverIndex) return;
+            _hoverIndex = index;
+            Cursor = index >= 0 ? Cursors.Hand : Cursors.Default;
+            Invalidate();
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _hoverIndex = -1;
+            Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            int index = HitTest(e.Location);
+            if (index >= 0) _owner.SelectedIndex = index;
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            var key = keyData & Keys.KeyCode;
+            if (key is Keys.Left or Keys.Right) return true;
+            return base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (_owner.TabPages.Count == 0) return;
+            if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Left)
+            {
+                int d = e.KeyCode == Keys.Right ? 1 : -1;
+                _owner.SelectedIndex = Math.Clamp(_owner.SelectedIndex + d, 0, _owner.TabPages.Count - 1);
+                e.Handled = true;
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(UiTheme.Card);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            for (int i = 0; i < _owner.TabPages.Count; i++)
+            {
+                var tab = _owner.TabPages[i];
+                var rect = GetTabBounds(i);
+                bool selected = i == _owner.SelectedIndex;
+                Color bg = selected ? UiTheme.Card2 : i == _hoverIndex
+                    ? Color.FromArgb(28, 39, 58) : UiTheme.Card;
+                using (var path = UiGeometry.RoundedRect(rect, 8))
+                using (var brush = new SolidBrush(bg))
+                    e.Graphics.FillPath(brush, path);
+
+                TextRenderer.DrawText(e.Graphics, tab.Text, Font, rect,
+                    selected ? UiTheme.Text : UiTheme.Muted,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+                if (selected)
+                {
+                    using var accent = new SolidBrush(UiTheme.Accent);
+                    e.Graphics.FillRectangle(accent, rect.Left + 10, rect.Bottom - 3,
+                        Math.Max(1, rect.Width - 20), 3);
+                }
+            }
         }
     }
 }

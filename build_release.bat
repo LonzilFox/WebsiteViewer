@@ -9,7 +9,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Building WebsiteViewer v0.0.3 Release...
+echo Building WebsiteViewer v0.0.4 Release...
 dotnet build WebsiteViewer.csproj -c Release
 if errorlevel 1 (
     echo.

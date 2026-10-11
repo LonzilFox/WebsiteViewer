@@ -28,10 +28,10 @@ internal sealed class MainForm : Form
     private readonly RoundedButton _showBranchPagesButton;
 
     private readonly FlatTabControl _tabs = new();
-    private readonly TabPage _pagesTab = new("页面列表");
-    private readonly TabPage _sectionsTab = new("栏目统计");
-    private readonly TabPage _treeTab = new("结构树");
-    private readonly TabPage _logTab = new("运行日志");
+    private readonly Panel _pagesTab = new() { Text = "页面列表" };
+    private readonly Panel _sectionsTab = new() { Text = "栏目统计" };
+    private readonly Panel _treeTab = new() { Text = "结构树" };
+    private readonly Panel _logTab = new() { Text = "运行日志" };
 
     private readonly BufferedTreeView _tree = new();
     private readonly BufferedDataGridView _pagesGrid = new();
@@ -308,7 +308,7 @@ internal sealed class MainForm : Form
         _urlBox.Dock = DockStyle.Fill;
         _urlBox.Margin = new Padding(0);
         UiTheme.StyleTextBox(_urlBox);
-        urlHost.Controls.Add(_urlBox, 0, 1);
+        urlHost.Controls.Add(UiTheme.InputHost(_urlBox), 0, 1);
 
         ConfigureTopActionButton(_startButton, new Padding(4, 20, 4, 0));
         ConfigureTopActionButton(_stopButton, new Padding(4, 20, 0, 0));
@@ -407,7 +407,7 @@ internal sealed class MainForm : Form
         _outputBox.Dock = DockStyle.Fill;
         _outputBox.Margin = new Padding(0, 0, 8, 0);
         UiTheme.StyleTextBox(_outputBox);
-        row.Controls.Add(_outputBox, 0, 1);
+        row.Controls.Add(UiTheme.InputHost(_outputBox, margin: new Padding(0, 0, 8, 0)), 0, 1);
 
         ConfigureOutputButton(_browseButton, new Padding(0));
         ConfigureOutputButton(_exportButton, new Padding(4, 0, 0, 0));
@@ -515,7 +515,7 @@ internal sealed class MainForm : Form
     {
         var card = UiTheme.CardPanel();
         card.Dock = DockStyle.Fill;
-        card.Padding = new Padding(1);
+        card.Padding = new Padding(0);
 
         _tabs.Dock = DockStyle.Fill;
         _tabs.Margin = new Padding(0);
@@ -575,7 +575,7 @@ internal sealed class MainForm : Form
         UiTheme.StyleTextBox(_searchBox);
         _clearSearchButton.Dock = DockStyle.Fill;
         _clearSearchButton.Margin = new Padding(4, 0, 0, 0);
-        searchRow.Controls.Add(_searchBox, 0, 0);
+        searchRow.Controls.Add(UiTheme.InputHost(_searchBox), 0, 0);
         searchRow.Controls.Add(_clearSearchButton, 1, 0);
 
         layout.Controls.Add(searchRow, 0, 0);
@@ -626,9 +626,9 @@ internal sealed class MainForm : Form
         PrepareDetailBox(_selectedCanonicalBox);
 
         layout.Controls.Add(_selectedStatusValue, 0, 1);
-        layout.Controls.Add(_selectedParentBox, 1, 1);
-        layout.Controls.Add(_selectedSourceBox, 2, 1);
-        layout.Controls.Add(_selectedCanonicalBox, 3, 1);
+        layout.Controls.Add(UiTheme.InputHost(_selectedParentBox, readOnly: true, margin: new Padding(0, 0, 8, 0)), 1, 1);
+        layout.Controls.Add(UiTheme.InputHost(_selectedSourceBox, readOnly: true, margin: new Padding(0, 0, 8, 0)), 2, 1);
+        layout.Controls.Add(UiTheme.InputHost(_selectedCanonicalBox, readOnly: true, margin: new Padding(0, 0, 0, 0)), 3, 1);
         card.Controls.Add(layout);
         return card;
     }

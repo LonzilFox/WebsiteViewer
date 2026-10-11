@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore WebsiteViewer.csproj
+
+      - name: Build
+        run: dotnet build WebsiteViewer.csproj -c Release --no-restore
+
+      - name: Publish win-x64
+        run: dotnet publish WebsiteViewer.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/win-x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebsiteViewer-win-x64
+          path: publish/win-x64/
