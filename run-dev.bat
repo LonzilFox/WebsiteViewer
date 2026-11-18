@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title WebsiteViewer v0.0.4 - Dev Runner
+title WebsiteViewer v0.0.5 - Dev Runner
 
 where dotnet >nul 2>nul
 if errorlevel 1 (
@@ -13,7 +13,7 @@ if errorlevel 1 (
 )
 
 echo ============================================================
-echo WebsiteViewer v0.0.4
+echo WebsiteViewer v0.0.5
 echo Build then run in Development mode
 echo ============================================================
 echo.

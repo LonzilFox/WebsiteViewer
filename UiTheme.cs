@@ -114,7 +114,7 @@ internal static class UiTheme
         var bg = readOnly ? Color.FromArgb(10, 16, 28) : Input;
         var host = new Panel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
             BackColor = bg,
             Margin = margin ?? Padding.Empty,
             Padding = Padding.Empty
@@ -123,29 +123,22 @@ internal static class UiTheme
         box.BackColor = bg;
         box.AutoSize = true;
         box.Dock = DockStyle.None;
-        box.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        box.Anchor = AnchorStyles.Top | AnchorStyles.Left;
         box.Margin = Padding.Empty;
         void Reposition()
         {
             if (host.IsDisposed || box.IsDisposed) return;
             int h = box.PreferredHeight;
-            box.SetBounds(9, Math.Max(0, (host.ClientSize.Height - h) / 2),
-                Math.Max(1, host.ClientSize.Width - 18), h);
+            int pad = Math.Max(1, (int)Math.Round(9 * host.DeviceDpi / 96.0));
+            box.SetBounds(pad, Math.Max(0, (host.ClientSize.Height - h) / 2),
+                Math.Max(1, host.ClientSize.Width - 2 * pad), h);
         }
         host.Controls.Add(box);
         host.SizeChanged += (_, _) => Reposition();
         box.FontChanged += (_, _) => Reposition();
+        box.DpiChangedAfterParent += (_, _) => Reposition();
         Reposition();
         return host;
-    }
-
-    public static void StyleNumeric(NumericUpDown box)
-    {
-        box.BackColor = Input;
-        box.ForeColor = Text;
-        box.BorderStyle = BorderStyle.None;
-        box.Font = UiFont(9.3f);
-        box.Height = 32;
     }
 
     public static void StyleCheckBox(CheckBox box)

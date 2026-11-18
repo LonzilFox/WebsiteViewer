@@ -9,20 +9,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set OUT=%~dp0publish\win-x64
-if exist "%OUT%" rmdir /s /q "%OUT%"
-
-echo Publishing portable self-contained win-x64...
+echo Building and publishing WebsiteViewer Release...
+set "OUT=%~dp0publish\win-x64"
 dotnet publish WebsiteViewer.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o "%OUT%"
 if errorlevel 1 (
-    echo.
-    echo PUBLISH FAILED.
+    echo BUILD FAILED. See the compiler output above.
     pause
     exit /b 1
 )
-
-echo.
-echo PUBLISH OK.
-echo Output: %OUT%
+echo BUILD OK.
+echo Output: "%OUT%\WebsiteViewer.exe"
 pause
-endlocal
+exit /b 0

@@ -33,7 +33,7 @@ internal sealed class SiteCrawler : IDisposable
             MaxAutomaticRedirections = 8
         };
         _client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
-        _client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebsiteViewer/0.0.4");
+        _client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebsiteViewer/0.0.5");
         _client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
         _client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/xhtml+xml"));
         _client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9,en;q=0.6");

@@ -7,13 +7,13 @@ namespace WebsiteViewer;
 internal sealed class MainForm : Form
 {
     private readonly TextBox _urlBox = new();
-    private readonly NumericUpDown _maxPages = new();
-    private readonly NumericUpDown _maxDepth = new();
-    private readonly NumericUpDown _delayMs = new();
-    private readonly NumericUpDown _concurrency = new();
-    private readonly CheckBox _stripQuery = new();
-    private readonly CheckBox _respectRobots = new();
-    private readonly CheckBox _includeSubdomains = new();
+    private readonly DarkNumber _maxPages = new();
+    private readonly DarkNumber _maxDepth = new();
+    private readonly DarkNumber _delayMs = new();
+    private readonly DarkNumber _concurrency = new();
+    private readonly DarkCheckBox _stripQuery = new();
+    private readonly DarkCheckBox _respectRobots = new();
+    private readonly DarkCheckBox _includeSubdomains = new();
     private readonly TextBox _outputBox = new();
     private readonly TextBox _searchBox = new();
 
@@ -45,12 +45,36 @@ internal sealed class MainForm : Form
     private readonly TextBox _selectedCanonicalBox = new();
     private readonly SlimProgressBar _progress = new();
     private readonly System.Windows.Forms.Timer _uiTimer = new();
-    private readonly TableLayoutPanel _statsLayout = new();
-    private readonly List<Control> _statCards = new();
-    private readonly RowStyle _statsRowStyle = new(SizeType.Absolute, 132);
+    private readonly BufferedPanel _scrollHost = new() { AutoScroll = true, BackColor = UiTheme.Bg };
+    private readonly BufferedPanel _surface = new() { BackColor = UiTheme.Bg };
+    private readonly BufferedPanel _header = new() { BackColor = UiTheme.Bg };
+    private readonly RoundedPanel _settings = UiTheme.CardPanel();
+    private readonly BufferedPanel _statsLayout = new() { BackColor = UiTheme.Bg };
+    private readonly RoundedPanel _workspace = UiTheme.CardPanel();
+    private readonly BufferedPanel _statusBar = new() { BackColor = UiTheme.Bg };
+    private readonly Label _title = new();
+    private readonly Label _subtitle = new();
     private readonly Label _headerHint = new();
-    private readonly RowStyle _pageDetailRowStyle = new(SizeType.Absolute, 88);
-    private Control? _pageDetailCard;
+    private readonly Label _urlLabel = FieldLabel("目标网站");
+    private readonly Label _outputLabel = FieldLabel("输出目录");
+    private readonly Label[] _numberLabels = { FieldLabel("最多页面"), FieldLabel("最大深度"), FieldLabel("请求间隔 ms"), FieldLabel("并发") };
+    private readonly Label[] _detailLabels = { FieldLabel("父级 URL"), FieldLabel("发现来源"), FieldLabel("Canonical / 错误") };
+    private readonly List<(RoundedPanel Card, Label Name, Label Value)> _statCards = new();
+    private readonly RoundedPanel _pageDetailCard = UiTheme.CardPanel(10);
+    private Panel _urlHost = null!, _outputHost = null!, _searchHost = null!;
+    private Panel[] _detailHosts = null!;
+    private readonly ToolTip _toolTip = new() { ShowAlways = true, OwnerDraw = true, BackColor = UiTheme.Card2, ForeColor = UiTheme.Text };
+    private Control _versionPill = null!;
+    private bool _uiBuilt;
+    private bool _layingOut;
+    private bool _compactLayout;
+    private int _gridDpi;
+    private int _measureDpi;
+    private readonly Dictionary<(string, Font), Size> _textMeasurements = new();
+    private readonly RoundedButton _settingsToggle = UiTheme.Button("收起设置");
+    private readonly RoundedButton _detailToggle = UiTheme.Button("收起详情");
+    private bool _settingsExpanded = true;
+    private bool _detailsExpanded = true;
 
     private readonly Dictionary<string, Label> _statValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TreeNode> _treeNodes = new(StringComparer.OrdinalIgnoreCase);
@@ -75,10 +99,6 @@ internal sealed class MainForm : Form
     private bool _processingUiBatch;
     private long _lastSectionsRefreshTick;
     private long _lastElapsedRefreshTick;
-    private int _lastResponsiveColumns = -1;
-    private bool _lastCompactHeight;
-    private bool _lastHeaderHintVisible;
-    private bool _responsiveInitialized;
     private bool _initialWindowSized;
     private bool _running;
 
@@ -86,12 +106,13 @@ internal sealed class MainForm : Form
     {
         Text = AppInfo.DisplayName;
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(760, 560);
+        MinimumSize = new Size(640, 480);
         Size = new Size(1480, 920);
         BackColor = UiTheme.Bg;
         ForeColor = UiTheme.Text;
         Font = UiTheme.UiFont();
-        AutoScaleMode = AutoScaleMode.Dpi;
+        // Layout is measured in device pixels; do not apply WinForms autoscaling a second time.
+        AutoScaleMode = AutoScaleMode.None;
         KeyPreview = true;
 
         _startButton = UiTheme.Button("开始扫描", ButtonTone.Primary);
@@ -104,40 +125,80 @@ internal sealed class MainForm : Form
         _clearTreeFilterButton = UiTheme.Button("取消结构筛选");
         _showBranchPagesButton = UiTheme.Button("查看此分支页面", ButtonTone.Blue);
 
+        _toolTip.Draw += (_, e) => { e.DrawBackground(); e.DrawText(TextFormatFlags.Left | TextFormatFlags.VerticalCenter); };
         BuildUi();
         WireEvents();
-        ApplyResponsiveLayout();
         SetRunning(false);
         ClearSelectedPageDetail();
 
         _uiTimer.Interval = 100;
         _uiTimer.Tick += (_, _) => ProcessUiBatch();
         _uiTimer.Start();
-        SizeChanged += (_, _) => _layoutDirty = true;
+        ClientSizeChanged += (_, _) => { _layoutDirty = true; ApplyResponsiveLayout(); };
+        _scrollHost.ClientSizeChanged += (_, _) => { if (!_layingOut) _layoutDirty = true; };
+        DpiChanged += (_, _) =>
+        {
+            _gridDpi = 0;
+            _layoutDirty = true;
+            if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)(() => { FitMinimumSize(); ApplyResponsiveLayout(); }));
+        };
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        FitMinimumSize();
+        FitWindowToWorkingAreaOnce();
     }
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        FitWindowToWorkingAreaOnce();
+        NativeDarkTheme.ApplyFrame(Handle);
         ApplyResponsiveLayout();
+        _scrollHost.AutoScrollPosition = Point.Empty;
     }
 
     private void FitWindowToWorkingAreaOnce()
     {
         if (_initialWindowSized) return;
         _initialWindowSized = true;
-
         Rectangle work = Screen.FromControl(this).WorkingArea;
-        int availableWidth = Math.Max(MinimumSize.Width, work.Width - 48);
-        int availableHeight = Math.Max(MinimumSize.Height, work.Height - 48);
-        int targetWidth = Math.Min(Width, availableWidth);
-        int targetHeight = Math.Min(Height, availableHeight);
-        Size = new Size(targetWidth, targetHeight);
-
-        int x = work.Left + Math.Max(0, (work.Width - targetWidth) / 2);
-        int y = work.Top + Math.Max(0, (work.Height - targetHeight) / 2);
-        Location = new Point(x, y);
+        int frameW = Math.Max(0, Width - ClientSize.Width);
+        int frameH = Math.Max(0, Height - ClientSize.Height);
+        int maxW = Math.Max(1, work.Width - frameW);
+        int maxH = Math.Max(1, work.Height - frameH);
+        // All settings and details start expanded. Prefer fitting the complete view
+        // over retaining an arbitrary initial window size or hiding controls.
+        int w = Math.Min(Px(1480), maxW);
+        int h = Math.Min(Px(820), maxH);
+        _compactLayout = maxH < Px(880);
+        if (_gridDpi != DeviceDpi) ApplyGridMetrics();
+        int required = ArrangeSurface(w, 0);
+        if (required > h && w < maxW)
+        {
+            w = maxW;
+            required = ArrangeSurface(w, 0);
+        }
+        h = Math.Min(maxH, Math.Max(h, required));
+        // A compact layout may also fit when the normal one cannot.
+        if (required > maxH && !_compactLayout)
+        {
+            _compactLayout = true;
+            required = ArrangeSurface(w, 0);
+            h = Math.Min(maxH, Math.Max(h, required));
+        }
+        StartPosition = FormStartPosition.Manual;
+        ClientSize = new Size(w, h);
+        Location = new Point(work.Left + Math.Max(0, (work.Width - Width) / 2),
+            work.Top + Math.Max(0, (work.Height - Height) / 2));
+        ApplyResponsiveLayout();
+        if (_surface.Height > _scrollHost.ClientSize.Height && WindowState == FormWindowState.Normal)
+        {
+            // Use the remaining monitor work area before falling back to scrolling.
+            WindowState = FormWindowState.Maximized;
+            ApplyResponsiveLayout();
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -147,546 +208,118 @@ internal sealed class MainForm : Form
         _cts?.Dispose();
         _uiTimer.Stop();
         _uiTimer.Dispose();
+        _toolTip.Dispose();
         base.OnFormClosing(e);
+    }
+
+    // Keep the native Windows frame (Snap, resize, maximize and system menu).
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        NativeDarkTheme.ApplyFrame(Handle);
+    }
+
+    private int Px(int logical) => Math.Max(1, (int)Math.Round(logical * DeviceDpi / 96.0));
+
+    private void FitMinimumSize()
+    {
+        Rectangle work = Screen.FromControl(this).WorkingArea;
+        MinimumSize = new Size(Math.Min(Px(760), work.Width), Math.Min(Px(480), work.Height));
     }
 
     private void BuildUi()
     {
         SuspendLayout();
+        _scrollHost.Dock = DockStyle.Fill;
+        Controls.Add(_scrollHost);
+        _scrollHost.Controls.Add(_surface);
+        _surface.Controls.AddRange(new Control[] { _header, _settings, _statsLayout, _workspace, _statusBar });
 
-        var root = new TableLayoutPanel
+        SetLabel(_title, "WebsiteViewer", 15.5f, true, UiTheme.Text);
+        _title.AutoEllipsis = false;
+        _title.AutoSize = true;
+        SetLabel(_subtitle, "网站结构扫描 · 页面数量、栏目、父子关系与请求 / 解析耗时", 9f, false, UiTheme.Muted);
+        SetLabel(_headerHint, "双击页面可在浏览器打开", 8.5f, false, UiTheme.Muted);
+        _versionPill = CreatePill("v" + AppInfo.Version, UiTheme.Card2, UiTheme.Blue);
+        _header.Controls.AddRange(new Control[] { _title, _versionPill, _subtitle, _settingsToggle });
+        _settingsToggle.Click += (_, _) =>
         {
-            Dock = DockStyle.Fill,
-            BackColor = UiTheme.Bg,
-            Padding = new Padding(14),
-            Margin = new Padding(0),
-            ColumnCount = 1,
-            RowCount = 5
-        };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(_statsRowStyle);
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        Controls.Add(root);
-
-        root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildCrawlerCard(), 0, 1);
-        root.Controls.Add(BuildStatsPanel(), 0, 2);
-        root.Controls.Add(BuildWorkspace(), 0, 3);
-        root.Controls.Add(BuildStatusBar(), 0, 4);
-
-        ResumeLayout(true);
-    }
-
-    private Control BuildHeader()
-    {
-        var header = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = UiTheme.Bg,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = new Padding(0, 0, 0, 8)
-        };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-
-        var textStack = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            Margin = new Padding(0)
-        };
-        textStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        textStack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var titleRow = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = new Padding(0)
-        };
-        titleRow.Controls.Add(new Label
-        {
-            Text = "WebsiteViewer",
-            AutoSize = true,
-            Font = UiTheme.UiFont(18f, FontStyle.Bold),
-            ForeColor = UiTheme.Text,
-            Margin = new Padding(0, 1, 10, 0)
-        });
-        titleRow.Controls.Add(CreatePill("v" + AppInfo.Version, UiTheme.Blue, Color.FromArgb(7, 22, 43)));
-        titleRow.Controls.Add(CreatePill("网站结构扫描", UiTheme.Card2, UiTheme.Muted));
-
-        var subtitle = new Label
-        {
-            Text = "统计页面数量、栏目结构、父子关系，并实时记录请求与 HTML 解析耗时",
-            Dock = DockStyle.Fill,
-            AutoEllipsis = true,
-            ForeColor = UiTheme.Muted,
-            Font = UiTheme.UiFont(9.2f),
-            TextAlign = ContentAlignment.TopLeft,
-            Margin = new Padding(1, 1, 0, 0)
+            _settingsExpanded = !_settingsExpanded;
+            _settingsToggle.Text = _settingsExpanded ? "收起设置" : "展开设置";
+            ApplyResponsiveLayout();
         };
 
-        textStack.Controls.Add(titleRow, 0, 0);
-        textStack.Controls.Add(subtitle, 0, 1);
-        header.Controls.Add(textStack, 0, 0);
-
-        _headerHint.Text = "双击页面可在浏览器打开";
-        _headerHint.AutoSize = true;
-        _headerHint.ForeColor = UiTheme.Muted;
-        _headerHint.Font = UiTheme.UiFont(8.8f);
-        _headerHint.TextAlign = ContentAlignment.MiddleRight;
-        _headerHint.Anchor = AnchorStyles.Right;
-        _headerHint.Margin = new Padding(12, 10, 0, 0);
-        header.Controls.Add(_headerHint, 1, 0);
-        return header;
-    }
-
-    private Control BuildCrawlerCard()
-    {
-        var card = UiTheme.CardPanel();
-        card.AutoSize = true;
-        card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        card.Dock = DockStyle.Top;
-        card.Margin = new Padding(0, 0, 0, 10);
-
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 3,
-            Padding = new Padding(12, 11, 12, 11),
-            Margin = new Padding(0),
-            BackColor = Color.Transparent
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 3; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        card.Controls.Add(layout);
-
-        layout.Controls.Add(BuildUrlRow(), 0, 0);
-        layout.Controls.Add(BuildSettingsRow(), 0, 1);
-        layout.Controls.Add(BuildOutputRow(), 0, 2);
-        return card;
-    }
-
-    private Control BuildUrlRow()
-    {
-        var row = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 58,
-            AutoSize = false,
-            ColumnCount = 3,
-            RowCount = 1,
-            Margin = new Padding(0, 0, 0, 8),
-            BackColor = Color.Transparent
-        };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126));
-        row.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-
-        var urlHost = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            Margin = new Padding(0, 0, 10, 0),
-            BackColor = Color.Transparent
-        };
-        urlHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        urlHost.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        urlHost.Controls.Add(FieldLabel("目标网站"), 0, 0);
         _urlBox.Text = "https://www.huaweicloud.com";
-        _urlBox.Dock = DockStyle.Fill;
-        _urlBox.Margin = new Padding(0);
+        _outputBox.Text = Path.Combine(AppContext.BaseDirectory, "out");
         UiTheme.StyleTextBox(_urlBox);
-        urlHost.Controls.Add(UiTheme.InputHost(_urlBox), 0, 1);
-
-        ConfigureTopActionButton(_startButton, new Padding(4, 20, 4, 0));
-        ConfigureTopActionButton(_stopButton, new Padding(4, 20, 0, 0));
-
-        row.Controls.Add(urlHost, 0, 0);
-        row.Controls.Add(_startButton, 1, 0);
-        row.Controls.Add(_stopButton, 2, 0);
-        return row;
-    }
-
-    private Control BuildSettingsRow()
-    {
+        UiTheme.StyleTextBox(_outputBox);
+        _urlHost = UiTheme.InputHost(_urlBox);
+        _outputHost = UiTheme.InputHost(_outputBox);
+        _settings.Controls.AddRange(new Control[] { _urlLabel, _urlHost, _startButton, _stopButton,
+            _outputLabel, _outputHost, _browseButton, _exportButton, _openOutputButton, _clearButton });
         ConfigureNumeric(_maxPages, 10, 100000, 3000);
         ConfigureNumeric(_maxDepth, 0, 100, 10);
         ConfigureNumeric(_delayMs, 0, 10000, 400);
         ConfigureNumeric(_concurrency, 1, 16, 4);
-
+        _maxPages.AccessibleName = "最多页面"; _maxDepth.AccessibleName = "最大深度";
+        _delayMs.AccessibleName = "请求间隔 ms"; _concurrency.AccessibleName = "并发";
+        _settings.Controls.AddRange(_numberLabels);
+        _settings.Controls.AddRange(new Control[] { _maxPages, _maxDepth, _delayMs, _concurrency });
         ConfigureCheck(_stripQuery, "忽略 URL 参数", true);
         ConfigureCheck(_respectRobots, "遵守 robots.txt", true);
         ConfigureCheck(_includeSubdomains, "包含子域名", false);
+        _settings.Controls.AddRange(new Control[] { _stripQuery, _respectRobots, _includeSubdomains });
+        _urlBox.AccessibleName = "目标网站";
+        _outputBox.AccessibleName = "输出目录";
+        _toolTip.SetToolTip(_urlBox, _urlBox.Text);
+        _toolTip.SetToolTip(_outputBox, _outputBox.Text);
+        _urlBox.TextChanged += (_, _) => _toolTip.SetToolTip(_urlBox, _urlBox.Text);
+        _outputBox.TextChanged += (_, _) => _toolTip.SetToolTip(_outputBox, _outputBox.Text);
+        _toolTip.SetToolTip(_urlHost, "输入要扫描的网站首页 URL");
+        _toolTip.SetToolTip(_outputHost, "导出结果保存目录，可编辑或选择目录");
 
-        // 固定为两层网格，不再使用 AutoSize + FlowLayoutPanel 自动换行。
-        // WinForms 在高 DPI / 窄窗口下对 AutoSize FlowLayout 的 PreferredSize 计算容易出现覆盖。
-        var outer = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 96,
-            AutoSize = false,
-            ColumnCount = 1,
-            RowCount = 2,
-            Margin = new Padding(0, 0, 0, 8),
-            BackColor = Color.Transparent
-        };
-        outer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        AddStat("已扫描", "0"); AddStat("成功 / 失败", "0 / 0");
+        AddStat("已发现 / 队列", "0 / 0"); AddStat("扫描速度", "0.00 页/秒");
+        AddStat("运行时间", "00:00:00"); AddStat("预计剩余", "--");
+        AddStat("平均请求", "0 ms"); AddStat("平均解析", "0 ms");
 
-        var numericRow = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 4,
-            RowCount = 1,
-            Margin = new Padding(0),
-            BackColor = Color.Transparent
-        };
-        for (int i = 0; i < 4; i++)
-            numericRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        numericRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        numericRow.Controls.Add(BuildNumericField("最多页面", _maxPages), 0, 0);
-        numericRow.Controls.Add(BuildNumericField("最大深度", _maxDepth), 1, 0);
-        numericRow.Controls.Add(BuildNumericField("请求间隔 ms", _delayMs), 2, 0);
-        numericRow.Controls.Add(BuildNumericField("并发", _concurrency, last: true), 3, 0);
-
-        var optionRow = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1,
-            Margin = new Padding(0),
-            BackColor = Color.Transparent
-        };
-        for (int i = 0; i < 3; i++)
-            optionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
-        optionRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        optionRow.Controls.Add(BuildCheckHost(_stripQuery), 0, 0);
-        optionRow.Controls.Add(BuildCheckHost(_respectRobots), 1, 0);
-        optionRow.Controls.Add(BuildCheckHost(_includeSubdomains), 2, 0);
-
-        outer.Controls.Add(numericRow, 0, 0);
-        outer.Controls.Add(optionRow, 0, 1);
-        return outer;
-    }
-
-    private Control BuildOutputRow()
-    {
-        var row = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 58,
-            AutoSize = false,
-            ColumnCount = 5,
-            RowCount = 2,
-            Margin = new Padding(0),
-            BackColor = Color.Transparent
-        };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
-        row.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        row.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-
-        row.Controls.Add(FieldLabel("输出目录"), 0, 0);
-        _outputBox.Text = Path.Combine(AppContext.BaseDirectory, "out");
-        _outputBox.Dock = DockStyle.Fill;
-        _outputBox.Margin = new Padding(0, 0, 8, 0);
-        UiTheme.StyleTextBox(_outputBox);
-        row.Controls.Add(UiTheme.InputHost(_outputBox, margin: new Padding(0, 0, 8, 0)), 0, 1);
-
-        ConfigureOutputButton(_browseButton, new Padding(0));
-        ConfigureOutputButton(_exportButton, new Padding(4, 0, 0, 0));
-        ConfigureOutputButton(_openOutputButton, new Padding(4, 0, 0, 0));
-        ConfigureOutputButton(_clearButton, new Padding(4, 0, 0, 0));
-
-        row.Controls.Add(_browseButton, 1, 1);
-        row.Controls.Add(_exportButton, 2, 1);
-        row.Controls.Add(_openOutputButton, 3, 1);
-        row.Controls.Add(_clearButton, 4, 1);
-        return row;
-    }
-
-    private Control BuildStatsPanel()
-    {
-        _statsLayout.Dock = DockStyle.Fill;
-        _statsLayout.ColumnCount = 4;
-        _statsLayout.RowCount = 2;
-        _statsLayout.Margin = new Padding(0, 0, 0, 10);
-        _statsLayout.Padding = new Padding(0);
-        for (int i = 0; i < 4; i++) _statsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        _statsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        _statsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-
-        AddStat(_statsLayout, 0, 0, "已扫描", "0");
-        AddStat(_statsLayout, 1, 0, "成功 / 失败", "0 / 0");
-        AddStat(_statsLayout, 2, 0, "已发现 / 队列", "0 / 0");
-        AddStat(_statsLayout, 3, 0, "扫描速度", "0.00 页/秒");
-        AddStat(_statsLayout, 0, 1, "运行时间", "00:00:00");
-        AddStat(_statsLayout, 1, 1, "预计剩余", "--");
-        AddStat(_statsLayout, 2, 1, "平均请求", "0 ms");
-        AddStat(_statsLayout, 3, 1, "平均解析", "0 ms");
-        return _statsLayout;
-    }
-
-    private void ApplyResponsiveLayout()
-    {
-        if (IsDisposed || _statsLayout.IsDisposed || _statCards.Count != 8) return;
-
-        int contentWidth = Math.Max(0, ClientSize.Width - 28);
-        bool compactHeight = ClientSize.Height < 760;
-        bool veryCompactHeight = ClientSize.Height < 600;
-        bool headerHintVisible = contentWidth >= 1120 && !compactHeight;
-        int columns = contentWidth >= 1260 ? 8 : 4;
-        int rows = 8 / columns;
-
-        // SizeChanged 会非常频繁触发。布局模式没有变化时绝不重复清空/重建统计卡，
-        // 否则拖动窗口本身就会造成明显卡顿和闪烁。
-        if (_responsiveInitialized &&
-            _lastResponsiveColumns == columns &&
-            _lastCompactHeight == compactHeight &&
-            _lastHeaderHintVisible == headerHintVisible &&
-            _statsLayout.Visible == !veryCompactHeight)
-        {
-            _layoutDirty = false;
-            return;
-        }
-
-        _responsiveInitialized = true;
-        _lastResponsiveColumns = columns;
-        _lastCompactHeight = compactHeight;
-        _lastHeaderHintVisible = headerHintVisible;
-        _layoutDirty = false;
-
-        _statsLayout.Visible = !veryCompactHeight;
-        _statsRowStyle.Height = veryCompactHeight ? 0 : columns == 8 ? 68 : (compactHeight ? 112 : 132);
-        _headerHint.Visible = headerHintVisible;
-        _pageDetailRowStyle.Height = compactHeight ? 0 : 88;
-        if (_pageDetailCard is not null) _pageDetailCard.Visible = !compactHeight;
-
-        _statsLayout.SuspendLayout();
-        try
-        {
-            _statsLayout.Controls.Clear();
-            _statsLayout.ColumnStyles.Clear();
-            _statsLayout.RowStyles.Clear();
-            _statsLayout.ColumnCount = columns;
-            _statsLayout.RowCount = rows;
-            for (int i = 0; i < columns; i++)
-                _statsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columns));
-            for (int i = 0; i < rows; i++)
-                _statsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rows));
-
-            for (int i = 0; i < _statCards.Count; i++)
-            {
-                int col = i % columns;
-                int row = i / columns;
-                var card = _statCards[i];
-                card.Margin = new Padding(
-                    col == 0 ? 0 : 4,
-                    row == 0 ? 0 : 4,
-                    col == columns - 1 ? 0 : 4,
-                    row == rows - 1 ? 0 : 4);
-                _statsLayout.Controls.Add(card, col, row);
-            }
-        }
-        finally
-        {
-            _statsLayout.ResumeLayout(true);
-        }
-        PerformLayout();
-    }
-
-    private Control BuildWorkspace()
-    {
-        var card = UiTheme.CardPanel();
-        card.Dock = DockStyle.Fill;
-        card.Padding = new Padding(0);
-
+        _workspace.Controls.Add(_tabs);
         _tabs.Dock = DockStyle.Fill;
-        _tabs.Margin = new Padding(0);
-        _pagesTab.BackColor = UiTheme.Card;
-        _sectionsTab.BackColor = UiTheme.Card;
-        _treeTab.BackColor = UiTheme.Card;
-        _logTab.BackColor = UiTheme.Card;
-        _pagesTab.ForeColor = UiTheme.Text;
-        _sectionsTab.ForeColor = UiTheme.Text;
-        _treeTab.ForeColor = UiTheme.Text;
-        _logTab.ForeColor = UiTheme.Text;
-
-        _pagesTab.Controls.Add(BuildPagesPanel());
-        _sectionsTab.Controls.Add(BuildSectionsPanel());
-        _treeTab.Controls.Add(BuildTreePanel());
-        _logTab.Controls.Add(BuildLogPanel());
-
-        _tabs.TabPages.Add(_pagesTab);
-        _tabs.TabPages.Add(_sectionsTab);
-        _tabs.TabPages.Add(_treeTab);
-        _tabs.TabPages.Add(_logTab);
-        card.Controls.Add(_tabs);
-        return card;
-    }
-
-    private Control BuildPagesPanel()
-    {
         ConfigurePagesGrid();
-
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            Padding = new Padding(10),
-            Margin = new Padding(0),
-            BackColor = UiTheme.Card
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(_pageDetailRowStyle);
-
-        var searchRow = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1,
-            Margin = new Padding(0, 0, 0, 7)
-        };
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 106));
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
-
-        _searchBox.Dock = DockStyle.Fill;
-        _searchBox.PlaceholderText = "筛选 URL / 标题 / 栏目；结构树筛选也会同步作用到这里";
+        _pagesGrid.Dock = DockStyle.None;
+        _searchBox.PlaceholderText = "筛选 URL / 标题 / 栏目 / 状态";
         UiTheme.StyleTextBox(_searchBox);
-        _clearSearchButton.Dock = DockStyle.Fill;
-        _clearSearchButton.Margin = new Padding(4, 0, 0, 0);
-        searchRow.Controls.Add(UiTheme.InputHost(_searchBox), 0, 0);
-        searchRow.Controls.Add(_clearSearchButton, 1, 0);
-
-        layout.Controls.Add(searchRow, 0, 0);
-        layout.Controls.Add(_pagesGrid, 0, 1);
-        _pageDetailCard = BuildSelectedPageDetail();
-        layout.Controls.Add(_pageDetailCard, 0, 2);
-        return layout;
-    }
-
-    private Control BuildSelectedPageDetail()
-    {
-        var card = UiTheme.CardPanel(10);
-        card.Dock = DockStyle.Fill;
-        card.BackColor = UiTheme.Input;
-        card.Margin = new Padding(0, 8, 0, 0);
-
-        var layout = new TableLayoutPanel
+        _searchHost = UiTheme.InputHost(_searchBox);
+        _searchBox.AccessibleName = "筛选页面";
+        _pageDetailCard.BackColor = UiTheme.Input;
+        SetLabel(_selectedStatusValue, "尚未选择页面", 9f, true, UiTheme.Muted);
+        _pageDetailCard.Controls.Add(_selectedStatusValue);
+        var detailBoxes = new[] { _selectedParentBox, _selectedSourceBox, _selectedCanonicalBox };
+        _detailHosts = new Panel[3];
+        for (int i = 0; i < 3; i++)
         {
-            Dock = DockStyle.Fill,
-            ColumnCount = 4,
-            RowCount = 2,
-            Padding = new Padding(10, 7, 10, 8),
-            Margin = new Padding(0),
-            BackColor = Color.Transparent
+            UiTheme.StyleTextBox(detailBoxes[i], readOnly: true);
+            detailBoxes[i].AccessibleName = _detailLabels[i].Text;
+            TextBox detailBox = detailBoxes[i];
+            detailBox.TextChanged += (_, _) => _toolTip.SetToolTip(detailBox, detailBox.Text);
+            _detailHosts[i] = UiTheme.InputHost(detailBoxes[i], readOnly: true);
+            _pageDetailCard.Controls.Add(_detailLabels[i]);
+            _pageDetailCard.Controls.Add(_detailHosts[i]);
+        }
+        _pagesTab.Controls.AddRange(new Control[] { _searchHost, _clearSearchButton, _detailToggle, _headerHint, _pagesGrid, _pageDetailCard });
+        _detailToggle.Click += (_, _) =>
+        {
+            _detailsExpanded = !_detailsExpanded;
+            _detailToggle.Text = _detailsExpanded ? "收起详情" : "展开详情";
+            ApplyResponsiveLayout();
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3f));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3f));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.4f));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        layout.Controls.Add(FieldLabel("选中页面"), 0, 0);
-        layout.Controls.Add(FieldLabel("父级 URL"), 1, 0);
-        layout.Controls.Add(FieldLabel("发现来源"), 2, 0);
-        layout.Controls.Add(FieldLabel("Canonical / 错误"), 3, 0);
-
-        _selectedStatusValue.Text = "尚未选择页面";
-        _selectedStatusValue.Dock = DockStyle.Fill;
-        _selectedStatusValue.AutoEllipsis = true;
-        _selectedStatusValue.TextAlign = ContentAlignment.MiddleLeft;
-        _selectedStatusValue.ForeColor = UiTheme.Muted;
-        _selectedStatusValue.Font = UiTheme.UiFont(9f, FontStyle.Bold);
-        _selectedStatusValue.Margin = new Padding(0, 0, 8, 0);
-
-        PrepareDetailBox(_selectedParentBox);
-        PrepareDetailBox(_selectedSourceBox);
-        PrepareDetailBox(_selectedCanonicalBox);
-
-        layout.Controls.Add(_selectedStatusValue, 0, 1);
-        layout.Controls.Add(UiTheme.InputHost(_selectedParentBox, readOnly: true, margin: new Padding(0, 0, 8, 0)), 1, 1);
-        layout.Controls.Add(UiTheme.InputHost(_selectedSourceBox, readOnly: true, margin: new Padding(0, 0, 8, 0)), 2, 1);
-        layout.Controls.Add(UiTheme.InputHost(_selectedCanonicalBox, readOnly: true, margin: new Padding(0, 0, 0, 0)), 3, 1);
-        card.Controls.Add(layout);
-        return card;
-    }
-
-    private Control BuildSectionsPanel()
-    {
+        _pagesTab.ClientSizeChanged += (_, _) => LayoutPages();
         ConfigureSectionsGrid();
-        var panel = new Panel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(10),
-            BackColor = UiTheme.Card
-        };
-        panel.Controls.Add(_sectionsGrid);
-        return panel;
-    }
-
-    private Control BuildTreePanel()
-    {
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            Padding = new Padding(10),
-            BackColor = UiTheme.Card
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var toolbar = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1,
-            Margin = new Padding(0, 0, 0, 8)
-        };
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 142));
-
-        _filterLabel.Text = "当前：显示全部页面";
-        _filterLabel.Dock = DockStyle.Fill;
-        _filterLabel.ForeColor = UiTheme.Muted;
-        _filterLabel.Font = UiTheme.UiFont(9.1f);
-        _filterLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _filterLabel.AutoEllipsis = true;
-        _clearTreeFilterButton.Dock = DockStyle.Fill;
-        _clearTreeFilterButton.Margin = new Padding(4, 0, 4, 0);
-        _showBranchPagesButton.Dock = DockStyle.Fill;
-        _showBranchPagesButton.Margin = new Padding(4, 0, 0, 0);
-
-        toolbar.Controls.Add(_filterLabel, 0, 0);
-        toolbar.Controls.Add(_clearTreeFilterButton, 1, 0);
-        toolbar.Controls.Add(_showBranchPagesButton, 2, 0);
-
-        _tree.Dock = DockStyle.Fill;
+        _sectionsGrid.Dock = DockStyle.None;
+        _sectionsTab.Controls.Add(_sectionsGrid);
+        _sectionsTab.ClientSizeChanged += (_, _) => LayoutSections();
+        SetLabel(_filterLabel, "当前：显示全部页面", 9.1f, false, UiTheme.Muted);
+        _tree.Dock = DockStyle.None;
         _tree.BackColor = UiTheme.Input;
         _tree.ForeColor = UiTheme.Text;
         _tree.BorderStyle = BorderStyle.None;
@@ -694,61 +327,352 @@ internal sealed class MainForm : Form
         _tree.HideSelection = false;
         _tree.ShowNodeToolTips = true;
         _tree.FullRowSelect = true;
-        _tree.Indent = 22;
-        _tree.ItemHeight = 28;
-
-        layout.Controls.Add(toolbar, 0, 0);
-        layout.Controls.Add(_tree, 0, 1);
-        return layout;
-    }
-
-    private Control BuildLogPanel()
-    {
+        _treeTab.Controls.AddRange(new Control[] { _filterLabel, _clearTreeFilterButton, _showBranchPagesButton, _tree });
+        _treeTab.ClientSizeChanged += (_, _) => LayoutTree();
         ConfigureLogBox();
-        var panel = new Panel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(10),
-            BackColor = UiTheme.Card
-        };
-        panel.Controls.Add(_logBox);
-        return panel;
+        _logBox.Dock = DockStyle.None;
+        _logTab.Controls.Add(_logBox);
+        _logTab.ClientSizeChanged += (_, _) => LayoutLogs();
+        _tabs.TabPages.Add(_pagesTab);
+        _tabs.TabPages.Add(_sectionsTab);
+        _tabs.TabPages.Add(_treeTab);
+        _tabs.TabPages.Add(_logTab);
+        _tabs.SelectedIndexChanged += (_, _) => { LayoutPages(); LayoutSections(); LayoutTree(); LayoutLogs(); };
+        SetLabel(_statusLabel, "就绪 · 输入网址后点击“开始扫描”", 8.9f, false, UiTheme.Muted);
+        _statusBar.Controls.AddRange(new Control[] { _statusLabel, _progress });
+        _progress.Maximum = 1000;
+
+        foreach (var control in new Control[] { _scrollHost, _tree, _pagesGrid, _sectionsGrid, _logBox })
+            NativeDarkTheme.Attach(control);
+        _uiBuilt = true;
+        ResumeLayout(true);
     }
 
-    private Control BuildStatusBar()
+    private static void SetLabel(Label label, string text, float size, bool bold, Color color)
     {
-        var panel = new TableLayoutPanel
+        label.Text = text;
+        label.Font = UiTheme.UiFont(size, bold ? FontStyle.Bold : FontStyle.Regular);
+        label.ForeColor = color;
+        label.BackColor = Color.Transparent;
+        label.AutoSize = false;
+        label.AutoEllipsis = true;
+        label.TextAlign = ContentAlignment.MiddleLeft;
+        label.UseMnemonic = false;
+        label.Margin = Padding.Empty;
+    }
+
+    private Size Measure(string text, Font font)
+    {
+        if (_measureDpi != DeviceDpi) { _textMeasurements.Clear(); _measureDpi = DeviceDpi; }
+        var key = (text, font);
+        if (_textMeasurements.TryGetValue(key, out var size)) return size;
+        using var graphics = CreateGraphics();
+        size = TextRenderer.MeasureText(graphics, text, font, Size.Empty,
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        if (_textMeasurements.Count < 256) _textMeasurements[key] = size;
+        return size;
+    }
+    private int Line(Control c)
+    {
+        int preferred = c is Label label ? label.PreferredHeight : 0;
+        return Math.Max(Px(16), Math.Max(preferred, Math.Max(c.Font.Height, Measure("国Ag09", c.Font).Height)) + Px(_compactLayout ? 2 : 4));
+    }
+    private int ButtonWidth(RoundedButton b) => Measure(b.Text, b.Font).Width + Px(24);
+    private int InputHeight => Math.Max(Px(_compactLayout ? 30 : 36), Math.Max(_urlBox.PreferredHeight, Line(_startButton)) + Px(_compactLayout ? 6 : 10));
+    private static void Place(Control c, int x, int y, int w, int h)
+    {
+        var bounds = new Rectangle(x, y, Math.Max(1, w), Math.Max(1, h));
+        if (c.Bounds != bounds) c.Bounds = bounds;
+    }
+
+    private void ApplyResponsiveLayout()
+    {
+        if (!_uiBuilt || _layingOut || IsDisposed || !IsHandleCreated || WindowState == FormWindowState.Minimized) return;
+        _layingOut = true;
+        _layoutDirty = false;
+        _surface.SuspendLayout();
+        _scrollHost.SuspendLayout();
+        try
         {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = new Padding(0, 8, 0, 0),
-            Padding = new Padding(2, 5, 2, 0),
-            BackColor = UiTheme.Bg
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
+            if (_gridDpi != DeviceDpi) ApplyGridMetrics();
+            int barW = Math.Max(Px(18), SystemInformation.VerticalScrollBarWidth);
+            int availableW = Math.Max(1, _scrollHost.ClientSize.Width + (_scrollHost.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0));
+            int availableH = Math.Max(1, _scrollHost.ClientSize.Height + (_scrollHost.HorizontalScroll.Visible ? SystemInformation.HorizontalScrollBarHeight : 0));
+            _compactLayout = availableH < Px(880);
+            int width = availableW;
+            int totalH = ArrangeSurface(width, availableH);
+            if (totalH > availableH && !_compactLayout)
+            {
+                _compactLayout = true;
+                totalH = ArrangeSurface(width, availableH);
+            }
+            if (totalH > availableH)
+            {
+                width = Math.Max(1, availableW - barW);
+                totalH = ArrangeSurface(width, availableH);
+            }
+            // Never force the surface wider than the actual viewport. Only use
+            // vertical scrolling when even the full compact layout cannot fit.
+            _surface.Size = new Size(width, totalH);
+            _scrollHost.AutoScrollMinSize = new Size(0, totalH);
+            LayoutPages(); LayoutSections(); LayoutTree(); LayoutLogs();
+        }
+        finally
+        {
+            _surface.ResumeLayout(false);
+            _scrollHost.ResumeLayout(true);
+            _layingOut = false;
+        }
+    }
 
-        _statusLabel.Text = "就绪 · 输入网址后点击“开始扫描”";
-        _statusLabel.Dock = DockStyle.Fill;
-        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _statusLabel.ForeColor = UiTheme.Muted;
-        _statusLabel.Font = UiTheme.UiFont(8.9f);
-        _statusLabel.AutoEllipsis = true;
-        _progress.Dock = DockStyle.Fill;
-        _progress.Maximum = 1000;
-        _progress.Value = 0;
-        _progress.Margin = new Padding(12, 10, 0, 10);
+    private int ArrangeSurface(int width, int availableH)
+    {
+        int pad = Px(_compactLayout ? 8 : 12), gap = Px(_compactLayout ? 6 : 8), w = Math.Max(1, width - 2 * pad), y = pad;
+        int titleH = Math.Max(Math.Max(Line(_title), _title.PreferredHeight), Line(_settingsToggle)+Px(6)), subtitleH = Line(_subtitle);
+        int titleW = Math.Max(_title.PreferredWidth, Measure(_title.Text, _title.Font).Width) + Px(8);
+        int pillW = Math.Max(_versionPill.GetPreferredSize(Size.Empty).Width, Measure(_versionPill.Text, _versionPill.Font).Width) + Px(14);
+        int toggleW = ButtonWidth(_settingsToggle);
+        _versionPill.AutoSize = false;
+        Place(_title, 0, Math.Max(0,(titleH-_title.PreferredHeight)/2), titleW, titleH);
+        Place(_versionPill, Math.Max(titleW, _title.Right)+gap, 0, pillW, titleH);
+        bool wrapHeader = _versionPill.Right+toggleW+gap > w;
+        int subtitleY = titleH;
+        if (wrapHeader)
+        {
+            Place(_settingsToggle, Math.Max(0,w-toggleW), titleH+gap, toggleW, titleH);
+            subtitleY += titleH+gap;
+        }
+        else Place(_settingsToggle, w-toggleW, 0, toggleW, titleH);
+        int subtitleX = _versionPill.Right + gap;
+        int subtitleW = w - toggleW - gap - subtitleX;
+        bool inlineSubtitle = _compactLayout && !wrapHeader && subtitleW >= Measure(_subtitle.Text, _subtitle.Font).Width + Px(8);
+        if (inlineSubtitle) Place(_subtitle, subtitleX, 0, subtitleW, titleH);
+        else Place(_subtitle, 0, subtitleY, w, subtitleH);
+        Place(_header, pad, y, w, inlineSubtitle ? titleH : subtitleY + subtitleH);
+        y += _header.Height + gap;
+        int settingsH = LayoutSettings(w);
+        Place(_settings, pad, y, w, settingsH);
+        y += settingsH + gap;
+        int statsH = LayoutStats(w);
+        Place(_statsLayout, pad, y, w, statsH);
+        y += statsH + gap;
+        int statusH = Line(_statusLabel) + Px(4);
+        int pagePad = Px(_compactLayout ? 6 : 10);
+        int pageGap = Px(_compactLayout ? 4 : 7);
+        int minGrid = _pagesGrid.ColumnHeadersHeight + (_compactLayout ? 2 : 4) * _pagesGrid.RowTemplate.Height + Px(18);
+        int minWorkspace = _tabs.NavigationHeight + 2 * pagePad + InputHeight + Line(_headerHint) + pageGap + minGrid
+            + (_detailsExpanded ? PageDetailHeight(w - 2*pagePad) + pageGap : 0);
+        int workH = Math.Max(minWorkspace, availableH - y - gap - statusH - pad);
+        Place(_workspace, pad, y, w, workH);
+        y += workH + gap;
+        Place(_statusBar, pad, y, w, statusH);
+        int progressWidth = Math.Min(Px(220), w / 4);
+        Place(_statusLabel, 0, 0, w - progressWidth - gap, statusH);
+        Place(_progress, w - progressWidth, (statusH - Px(7)) / 2, progressWidth, Px(7));
+        return y + statusH + pad;
+    }
 
-        panel.Controls.Add(_statusLabel, 0, 0);
-        panel.Controls.Add(_progress, 1, 0);
-        return panel;
+    private int LayoutSettings(int width)
+    {
+        int p = Px(_compactLayout ? 8 : 12), g = Px(_compactLayout ? 5 : 8), w = Math.Max(1, width - 2*p), y = p;
+        int labelH = Line(_urlLabel), inputH = InputHeight;
+        int startW = ButtonWidth(_startButton), stopW = ButtonWidth(_stopButton);
+        int urlLabelW = Measure(_urlLabel.Text, _urlLabel.Font).Width + Px(6);
+        bool inlineUrl = _compactLayout && w >= urlLabelW+startW+stopW+3*g+Px(180);
+        int urlX = inlineUrl ? p+urlLabelW+g : p;
+        if (inlineUrl) Place(_urlLabel, p, y, urlLabelW, inputH);
+        else { Place(_urlLabel, p, y, w, labelH); y += labelH; }
+        int urlW = p+w-urlX;
+        bool urlWrap = urlW < startW + stopW + 2*g + Px(160);
+        Place(_urlHost, urlX, y, urlWrap ? urlW : urlW-startW-stopW-2*g, inputH);
+        if (urlWrap) y += inputH + g;
+        Place(_startButton, p+w-startW-stopW-g, y, startW, inputH);
+        Place(_stopButton, p+w-stopW, y, stopW, inputH);
+        y += inputH + g;
+        var numbers = new[] { _maxPages, _maxDepth, _delayMs, _concurrency };
+        // The target and start/stop remain visible even when advanced settings are collapsed.
+        foreach (Control c in _numberLabels) c.Visible = _settingsExpanded;
+        foreach (Control c in numbers) c.Visible = _settingsExpanded;
+        foreach (Control c in new Control[] { _stripQuery, _respectRobots, _includeSubdomains, _outputLabel, _outputHost,
+                _browseButton, _exportButton, _openOutputButton, _clearButton }) c.Visible = _settingsExpanded;
+        if (!_settingsExpanded) return y-g+p;
+        int numMin = Math.Max(_numberLabels.Max(l => Measure(l.Text, l.Font).Width + Px(15)),
+            Measure("100,000",_maxPages.Font).Width+Px(78));
+        int nc = w >= 4*numMin+3*g ? 4 : w >= 2*numMin+g ? 2 : 1;
+        int nw = (w-(nc-1)*g)/nc;
+        for (int i = 0; i < 4; i++)
+        {
+            int x = p + (i%nc)*(nw+g), yy = y+(i/nc)*(labelH+inputH+g);
+            Place(_numberLabels[i], x, yy, nw, labelH);
+            Place(numbers[i], x, yy+labelH, nw, inputH);
+        }
+        y += (4/nc)*(labelH+inputH+g);
+        int xCheck = p, checkH = Math.Max(Px(_compactLayout ? 22 : 27), Line(_stripQuery));
+        foreach (var check in new[] { _stripQuery, _respectRobots, _includeSubdomains })
+        {
+            int cw = Measure(check.Text, check.Font).Width + Px(30);
+            if (xCheck > p && xCheck + cw > p+w) { xCheck = p; y += checkH+Px(3); }
+            Place(check, xCheck, y, Math.Min(w,cw), checkH); xCheck += cw+Px(18);
+        }
+        y += checkH+g;
+        var actions = new[] { _browseButton, _exportButton, _openOutputButton, _clearButton };
+        int actionW = actions.Sum(ButtonWidth) + (actions.Length-1)*g;
+        int outLabelW = Measure(_outputLabel.Text,_outputLabel.Font).Width+Px(6);
+        bool inlineOutput = _compactLayout && w >= actionW+outLabelW+2*g+Px(140);
+        int outX = inlineOutput ? p+outLabelW+g : p;
+        if (inlineOutput) Place(_outputLabel,p,y,outLabelW,inputH);
+        else { Place(_outputLabel, p, y, w, labelH); y += labelH; }
+        int outW = p+w-outX;
+        bool outputWrap = outW < actionW+g+Px(140);
+        Place(_outputHost, outX, y, outputWrap ? outW : outW-actionW-g, inputH);
+        if (outputWrap) y += inputH+g;
+        int xAction = outputWrap ? p : p+w-actionW;
+        foreach (var button in actions)
+        {
+            int bw = Math.Min(w, ButtonWidth(button));
+            if (xAction > p && xAction+bw > p+w) { xAction=p; y+=inputH+g; }
+            Place(button, xAction, y, bw, inputH); xAction += bw+g;
+        }
+        return y+inputH+p;
+    }
+
+    private int LayoutStats(int w)
+    {
+        int g=Px(_compactLayout ? 5 : 8), p=Px(_compactLayout ? 5 : 9);
+        int labelH = Line(_statCards[0].Name), valueH = Line(_statCards[0].Value);
+        // Compute the actual per-card widths rather than reserving the largest count
+        // width for every card. On short screens use a one-line label/value pair
+        // when all cards can accommodate their full contents.
+        string[] worstValues = { "100,000", "100,000 / 100,000", "100,000 / 100,000", "999.99 页/秒", "99d 00:00:00", "99d 00:00:00", "99999 ms", "99999 ms" };
+        int minW = 0, inlineMinW = 0;
+        for (int i=0;i<_statCards.Count;i++)
+        {
+            var card = _statCards[i];
+            int nameW=Measure(card.Name.Text,card.Name.Font).Width, valueW=Measure(worstValues[i],card.Value.Font).Width;
+            minW = Math.Max(minW, Math.Max(nameW,valueW)+2*p+Px(6));
+            inlineMinW = Math.Max(inlineMinW, nameW+valueW+2*p+Px(10));
+        }
+        int cols = w >= 8*minW+7*g ? 8 : w >= 4*minW+3*g ? 4 : w >= 2*minW+g ? 2 : 1;
+        int cw = (w-(cols-1)*g)/cols;
+        bool inline = _compactLayout && cw >= inlineMinW;
+        int h = 2*p+(inline ? Math.Max(labelH,valueH) : labelH+valueH);
+        for (int i=0;i<8;i++)
+        {
+            var item=_statCards[i];
+            Place(item.Card,(i%cols)*(cw+g),(i/cols)*(h+g),cw,h);
+            if (inline)
+            {
+                int nameW = Measure(item.Name.Text,item.Name.Font).Width+Px(5);
+                Place(item.Name,p,p,nameW,h-2*p);
+                item.Value.TextAlign = ContentAlignment.MiddleRight;
+                Place(item.Value,p+nameW+Px(5),p,cw-2*p-nameW-Px(5),h-2*p);
+            }
+            else
+            {
+                item.Value.TextAlign = ContentAlignment.MiddleLeft;
+                Place(item.Name,p,p,cw-2*p,labelH);
+                Place(item.Value,p,p+labelH,cw-2*p,valueH);
+            }
+        }
+        return (8/cols)*(h+g)-g;
+    }
+
+    private int PageDetailHeight(int width)
+    {
+        int p=Px(_compactLayout ? 6 : 10), g=Px(_compactLayout ? 3 : 6);
+        int rows = width >= Px(520) ? 1 : 3;
+        return 2*p+Line(_selectedStatusValue)+g+rows*(Line(_detailLabels[0])+InputHeight)+(rows-1)*g;
+    }
+
+    private void LayoutPages()
+    {
+        if (!_uiBuilt) return;
+        int p=Px(_compactLayout ? 6 : 10), g=Px(_compactLayout ? 4 : 7), w=_pagesTab.ClientSize.Width-2*p, h=_pagesTab.ClientSize.Height-2*p;
+        if (w<=0 || h<=0) return;
+        int buttonW = ButtonWidth(_clearSearchButton), toggleW=ButtonWidth(_detailToggle), inputH=InputHeight, hintH=Line(_headerHint);
+        Place(_searchHost,p,p,w-buttonW-toggleW-2*g,inputH);
+        Place(_clearSearchButton,p+w-buttonW-toggleW-g,p,buttonW,inputH);
+        Place(_detailToggle,p+w-toggleW,p,toggleW,inputH);
+        Place(_headerHint,p,p+inputH,w,hintH);
+        int gridY=p+inputH+hintH+g;
+        _pageDetailCard.Visible = _detailsExpanded;
+        if (!_detailsExpanded)
+        {
+            Place(_pagesGrid,p,gridY,w,p+h-gridY);
+            return;
+        }
+        int detailH=PageDetailHeight(w), detailY=Math.Max(gridY+_pagesGrid.ColumnHeadersHeight+g,p+h-detailH);
+        Place(_pagesGrid,p,gridY,w,detailY-gridY-g);
+        Place(_pageDetailCard,p,detailY,w,detailH);
+        int dp=Px(_compactLayout ? 6 : 10), dg=Px(_compactLayout ? 3 : 6), dw=w-2*dp, dy=dp+Line(_selectedStatusValue)+dg;
+        Place(_selectedStatusValue,dp,dp,dw,Line(_selectedStatusValue));
+        int cols=w>=Px(520)?3:1, fieldW=(dw-(cols-1)*dg)/cols, lh=Line(_detailLabels[0]);
+        for (int i=0;i<3;i++)
+        {
+            int xx=dp+(i%cols)*(fieldW+dg), yy=dy+(i/cols)*(lh+inputH+dg);
+            Place(_detailLabels[i],xx,yy,fieldW,lh);
+            Place(_detailHosts[i],xx,yy+lh,fieldW,inputH);
+        }
+    }
+
+    private void LayoutSections()
+    {
+        if (!_uiBuilt) return;
+        int p=Px(10);
+        Place(_sectionsGrid,p,p,_sectionsTab.ClientSize.Width-2*p,_sectionsTab.ClientSize.Height-2*p);
+    }
+    private void LayoutTree()
+    {
+        if (!_uiBuilt) return;
+        int p=Px(10), g=Px(6), w=_treeTab.ClientSize.Width-2*p, h=_treeTab.ClientSize.Height-2*p;
+        int y=p, line=Line(_filterLabel), bh=InputHeight;
+        Place(_filterLabel,p,y,w,line); y+=line+g;
+        int b1=ButtonWidth(_clearTreeFilterButton), b2=ButtonWidth(_showBranchPagesButton);
+        Place(_clearTreeFilterButton,p,y,b1,bh);
+        Place(_showBranchPagesButton,p+b1+g,y,b2,bh); y+=bh+g;
+        Place(_tree,p,y,w,p+h-y);
+    }
+    private void LayoutLogs()
+    {
+        if (!_uiBuilt) return;
+        int p=Px(10);
+        Place(_logBox,p,p,_logTab.ClientSize.Width-2*p,_logTab.ClientSize.Height-2*p);
+    }
+
+    private void ApplyGridMetrics()
+    {
+        _gridDpi=DeviceDpi;
+        foreach (var grid in new[] { _pagesGrid, _sectionsGrid })
+        {
+            var headerFont=grid.ColumnHeadersDefaultCellStyle.Font ?? Font;
+            var cellFont=grid.DefaultCellStyle.Font ?? Font;
+            grid.ColumnHeadersHeight=Math.Max(Px(30),Measure("国Ag",headerFont).Height+Px(10));
+            grid.RowTemplate.Height=Math.Max(Px(27),Measure("国Ag",cellFont).Height+Px(8));
+            // Shared virtual rows must not be unshared just to change their height.
+            grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.None;
+            if (grid.VirtualMode && grid.RowCount > 0) grid.UpdateRowHeightInfo(0, true);
+            grid.ColumnHeadersDefaultCellStyle.Padding=new Padding(Px(4),0,Px(4),0);
+            grid.DefaultCellStyle.Padding=new Padding(Px(4),0,Px(4),0);
+            foreach (DataGridViewColumn c in grid.Columns)
+            {
+                int min=Measure(c.HeaderText,headerFont).Width+Px(14);
+                c.MinimumWidth=min;
+                if (c.AutoSizeMode==DataGridViewAutoSizeColumnMode.Fill)
+                    c.MinimumWidth=Math.Max(min,Px(c.Name=="Url"?135:86));
+                else
+                    c.Width=Math.Max(min,Px(c.Name switch { "Index"=>35,"Status"=>54,"Depth"=>48,"Section"=>76,"Fetch" or "Parse"=>80,_=>82 }));
+            }
+        }
+        _tree.ItemHeight=Math.Max(Px(26),Line(_tree)+Px(5));
+        _tree.Indent=Px(22);
+        _tabs.RefreshScale();
     }
 
     private void ConfigurePagesGrid()
     {
         UiTheme.StyleGrid(_pagesGrid);
         _pagesGrid.VirtualMode = true;
+        _pagesGrid.RowHeightInfoNeeded += (_, e) => { e.MinimumHeight = 2; e.Height = _pagesGrid.RowTemplate.Height; };
         _pagesGrid.RowCount = 0;
         _pagesGrid.Columns.Add(Column("Index", "#", 50));
         var statusColumn = Column("Status", "状态", 60);
@@ -1504,58 +1428,29 @@ internal sealed class MainForm : Form
         return t.ToString(@"hh\:mm\:ss");
     }
 
-    private void AddStat(TableLayoutPanel table, int column, int row, string name, string initial)
+    private void AddStat(string name, string initial)
     {
-        var card = UiTheme.CardPanel(12);
-        card.Dock = DockStyle.Fill;
-        card.Margin = new Padding(column == 0 ? 0 : 5, row == 0 ? 0 : 5, column == 3 ? 0 : 5, row == 1 ? 0 : 5);
-
-        var stack = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            Padding = new Padding(11, 7, 9, 6),
-            BackColor = Color.Transparent
-        };
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var label = new Label
-        {
-            Text = name,
-            Dock = DockStyle.Fill,
-            ForeColor = UiTheme.Muted,
-            Font = UiTheme.UiFont(8.4f),
-            AutoEllipsis = true,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        var value = new Label
-        {
-            Text = initial,
-            Dock = DockStyle.Fill,
-            ForeColor = UiTheme.Text,
-            Font = UiTheme.UiFont(12.5f, FontStyle.Bold),
-            AutoEllipsis = true,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        stack.Controls.Add(label, 0, 0);
-        stack.Controls.Add(value, 0, 1);
-        card.Controls.Add(stack);
-        _statValues[name] = value;
-        _statCards.Add(card);
-        table.Controls.Add(card, column, row);
+        var card=UiTheme.CardPanel(12);
+        var label=new Label(); var value=new Label();
+        SetLabel(label,name,8.8f,false,UiTheme.Muted);
+        SetLabel(value,initial,11.4f,true,UiTheme.Text);
+        card.Controls.AddRange(new Control[] { label,value });
+        _statValues[name]=value;
+        _statCards.Add((card,label,value));
+        _statsLayout.Controls.Add(card);
+        _toolTip.SetToolTip(value, initial);
     }
 
     private void SetStat(string name, string value)
     {
-        if (_statValues.TryGetValue(name, out var label)) label.Text = value;
+        if (_statValues.TryGetValue(name, out var label) && label.Text != value)
+        { label.Text = value; _toolTip.SetToolTip(label, value); }
     }
 
     private static Label FieldLabel(string text) => new()
     {
         Text = text,
-        Dock = DockStyle.Fill,
+        Dock = DockStyle.None,
         ForeColor = UiTheme.Muted,
         Font = UiTheme.UiFont(8.3f),
         TextAlign = ContentAlignment.MiddleLeft,
@@ -1576,66 +1471,12 @@ internal sealed class MainForm : Form
         };
     }
 
-    private static Control BuildNumericField(string label, NumericUpDown box, bool last = false)
-    {
-        var host = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Height = 56,
-            ColumnCount = 1,
-            RowCount = 2,
-            Margin = new Padding(0, 0, last ? 0 : 8, 0),
-            BackColor = Color.Transparent
-        };
-        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        host.Controls.Add(FieldLabel(label), 0, 0);
-        box.Dock = DockStyle.Fill;
-        box.Margin = new Padding(0);
-        host.Controls.Add(box, 0, 1);
-        return host;
-    }
-
-    private static Control BuildCheckHost(CheckBox box)
-    {
-        var host = new Panel
-        {
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 8, 0),
-            BackColor = Color.Transparent
-        };
-        box.AutoSize = false;
-        box.Dock = DockStyle.Fill;
-        box.TextAlign = ContentAlignment.MiddleLeft;
-        box.Margin = new Padding(0);
-        host.Controls.Add(box);
-        return host;
-    }
-
-    private static void ConfigureTopActionButton(RoundedButton button, Padding margin)
-    {
-        button.Dock = DockStyle.Fill;
-        button.Height = 38;
-        button.Margin = margin;
-        button.MinimumSize = new Size(0, 38);
-    }
-
-    private static void ConfigureOutputButton(RoundedButton button, Padding margin)
-    {
-        button.Dock = DockStyle.Fill;
-        button.Height = 38;
-        button.Margin = margin;
-        button.MinimumSize = new Size(0, 38);
-    }
-
-    private static void ConfigureNumeric(NumericUpDown box, decimal min, decimal max, decimal value)
+    private static void ConfigureNumeric(DarkNumber box, decimal min, decimal max, decimal value)
     {
         box.Minimum = min;
         box.Maximum = max;
         box.Value = value;
-        box.DecimalPlaces = 0;
-        box.ThousandsSeparator = true;
-        UiTheme.StyleNumeric(box);
+        box.Font = UiTheme.UiFont(9.5f);
     }
 
     private static void ConfigureCheck(CheckBox box, string text, bool value)
@@ -1643,14 +1484,8 @@ internal sealed class MainForm : Form
         box.Text = text;
         box.Checked = value;
         UiTheme.StyleCheckBox(box);
+        box.AutoSize = false;
         box.Margin = new Padding(0);
-    }
-
-    private static void PrepareDetailBox(TextBox box)
-    {
-        box.Dock = DockStyle.Fill;
-        box.Margin = new Padding(0, 0, 8, 0);
-        UiTheme.StyleTextBox(box, readOnly: true);
     }
 
     private static DataGridViewTextBoxColumn Column(string name, string title, int width) => new()

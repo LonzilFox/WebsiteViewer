@@ -7,7 +7,7 @@ internal static class UiGeometry
 {
     public static GraphicsPath RoundedRect(Rectangle rect, int radius)
     {
-        int diameter = Math.Max(2, radius * 2);
+        int diameter = Math.Max(1, Math.Min(radius * 2, Math.Min(rect.Width - 1, rect.Height - 1)));
         int right = rect.Right - 1;
         int bottom = rect.Bottom - 1;
         var path = new GraphicsPath();
@@ -45,7 +45,7 @@ internal sealed class RoundedPanel : Panel
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-        using var path = UiGeometry.RoundedRect(rect, Math.Min(Radius, Math.Min(rect.Width, rect.Height) / 2));
+        using var path = UiGeometry.RoundedRect(rect, Math.Min((int)Math.Round(Radius * DeviceDpi / 96.0), Math.Min(rect.Width, rect.Height) / 2));
         using var brush = new SolidBrush(BackColor);
         e.Graphics.FillPath(brush, path);
     }
@@ -69,7 +69,7 @@ internal sealed class RoundedPanel : Panel
         var rect = ClientRectangle;
         if (rect.Width <= 1 || rect.Height <= 1) return;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = UiGeometry.RoundedRect(rect, Math.Min(Radius, Math.Min(rect.Width, rect.Height) / 2));
+        using var path = UiGeometry.RoundedRect(rect, Math.Min((int)Math.Round(Radius * DeviceDpi / 96.0), Math.Min(rect.Width, rect.Height) / 2));
         using var pen = new Pen(BorderColor, BorderWidth) { Alignment = PenAlignment.Inset };
         e.Graphics.DrawPath(pen, path);
     }
@@ -148,7 +148,7 @@ internal sealed class RoundedButton : Button
         if (!Enabled)
             fill = ControlPaint.Dark(fill, 0.22f);
 
-        using var path = UiGeometry.RoundedRect(rect, Math.Min(Radius, Math.Min(Width, Height) / 2));
+        using var path = UiGeometry.RoundedRect(rect, Math.Min((int)Math.Round(Radius * DeviceDpi / 96.0), Math.Min(Width, Height) / 2));
         using var brush = new SolidBrush(fill);
         pevent.Graphics.FillPath(brush, path);
 
@@ -162,6 +162,11 @@ internal sealed class RoundedButton : Button
         }
 
         Color textColor = Enabled ? ForeColor : UiTheme.Muted;
+        if (Focused && ShowFocusCues && Enabled)
+        {
+            using var pen = new Pen(UiTheme.Blue, Math.Max(1, DeviceDpi / 96f));
+            pevent.Graphics.DrawLine(pen, Width / 4, Height - 4, Width * 3 / 4, Height - 4);
+        }
         TextRenderer.DrawText(
             pevent.Graphics,
             Text,
@@ -229,7 +234,7 @@ internal sealed class PillLabel : Control
         var rect = ClientRectangle;
         if (rect.Width <= 1 || rect.Height <= 1) return;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = UiGeometry.RoundedRect(rect, Math.Min(Radius, Math.Min(rect.Width, rect.Height) / 2));
+        using var path = UiGeometry.RoundedRect(rect, Math.Min((int)Math.Round(Radius * DeviceDpi / 96.0), Math.Min(rect.Width, rect.Height) / 2));
         using var brush = new SolidBrush(FillColor);
         e.Graphics.FillPath(brush, path);
         TextRenderer.DrawText(e.Graphics, Text, Font, rect, ForeColor,
@@ -308,6 +313,14 @@ internal sealed class FlatTabControl : UserControl
         TabPages = new TabCollection(this);
     }
 
+    public int NavigationHeight => _tabStrip.Height;
+
+    public void RefreshScale()
+    {
+        _tabStrip.Height = Math.Max((int)Math.Round(34 * DeviceDpi / 96.0), _tabStrip.Font.Height + (int)Math.Round(10 * DeviceDpi / 96.0));
+        _tabStrip.Invalidate();
+    }
+
     public sealed class TabCollection : Collection<Panel>
     {
         private readonly FlatTabControl _owner;
@@ -351,9 +364,7 @@ internal sealed class FlatTabControl : UserControl
     {
         private readonly FlatTabControl _owner;
         private int _hoverIndex = -1;
-        private const int TabWidth = 114;
-        private const int TabGap = 3;
-        private const int StartX = 8;
+        private int Px(int n) => Math.Max(1, (int)Math.Round(n * DeviceDpi / 96.0));
 
         public TabStrip(FlatTabControl owner)
         {
@@ -365,8 +376,11 @@ internal sealed class FlatTabControl : UserControl
                      ControlStyles.Selectable, true);
         }
 
-        private Rectangle GetTabBounds(int index) =>
-            new(StartX + index * (TabWidth + TabGap), 3, TabWidth, Math.Max(25, Height - 5));
+        private Rectangle GetTabBounds(int index)
+        {
+            int gap = Px(3), start = Px(8), w = Math.Min(Px(126), Math.Max(1, (Width - 2*start - 3*gap) / Math.Max(1, _owner.TabPages.Count)));
+            return new Rectangle(start+index*(w+gap), Px(3), w, Math.Max(1, Height-Px(5)));
+        }
 
         private int HitTest(Point p)
         {
@@ -442,8 +456,8 @@ internal sealed class FlatTabControl : UserControl
                 if (selected)
                 {
                     using var accent = new SolidBrush(UiTheme.Accent);
-                    e.Graphics.FillRectangle(accent, rect.Left + 10, rect.Bottom - 3,
-                        Math.Max(1, rect.Width - 20), 3);
+                    e.Graphics.FillRectangle(accent, rect.Left + Px(10), rect.Bottom - Px(3),
+                        Math.Max(1, rect.Width - Px(20)), Px(3));
                 }
             }
         }
@@ -526,5 +540,14 @@ internal sealed class BufferedTreeView : TreeView
         SetStyle(ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer |
                  ControlStyles.ResizeRedraw, true);
+    }
+}
+
+internal sealed class BufferedPanel : Panel
+{
+    public BufferedPanel()
+    {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw, true);
     }
 }
